@@ -2,6 +2,7 @@ import numpy as np
 import scipy.ndimage as nd
 from scipy.linalg import solve
 import netCDF4
+import datetime
 
 def LoadL3(l3f, varnames):
     res = {}
@@ -16,6 +17,13 @@ def LoadL3(l3f, varnames):
         res[varname] = {"value":value, "unit":unit}
     nc.close()
     return res
+
+def filename2days(filename_without_directory, t_str0):
+    #filename = "uvi_20170801_000000_l3b_v20180901.nc"
+    t  = datetime.datetime.strptime(filename_without_directory[4:19], '%Y%m%d_%H%M%S')
+    t0 = datetime.datetime.strptime(t_str0 , '%Y%m%d_%H%M%S')
+    t_flt = (t-t0).total_seconds()/86400.
+    return t_flt
 
 def GaussHighPass(img, degree):
     tmp = np.where(img-img==0, img, np.nanmean(img))

@@ -16,6 +16,17 @@ def SearchRangeInDegree(umin, vmin, umax, vmax, lat, dt, deg2grid, Rv):
     vmin2ind = int(vmin*dt*3600./circum*360.*deg2grid)
     return umin2ind, vmin2ind, umax2ind, vmax2ind
 
+def mps2dph(vel, Rv, lat=None, cos_factor=False):
+    """
+    convert unit of speed from m s^-1 to degree hr^-1
+    """
+    circum = 2*np.pi*Rv*1000. #[m]
+    if cos_factor:
+        cos_lat = np.cos(lat*np.pi/180.)
+    else:
+        cos_lat = 1.0
+    return vel*3600/(circum*cos_lat)*360
+
 def CCSMask(tmpl_shape, cc_shape, targ_mask):
     """
     Return array that masks a corss-correlation surface where the invalid radiance values are used for the calculation.
@@ -150,7 +161,7 @@ def ConvertNdarray2StrList(data, formater):
         data_str = np.array(list(m)).reshape(shape).tolist()
     return data_str
 
-def ConvertNdarray2List(data, formater):
+def ConvertNdarray2List(data):
     if isinstance(data, np.ndarray):
         data = data.tolist()
     elif isinstance(data, list):

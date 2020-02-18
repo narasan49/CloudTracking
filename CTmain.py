@@ -21,9 +21,9 @@ class CloudTracking():
         pass
 
     def __init__(
-            self, radiances, rad_masks, time, lon, lat, sslon, radius,
-            tsize, ulimit, vlimit, vel_margin=0.0, xdivision=None, ydivision=None,
-            eastwest_coordinate="lst"
+            self, radiances, time, lon, lat, radius,
+            tsize, ulimit, vlimit, rad_masks=None, vel_margin=0.0, xdivision=None, ydivision=None,
+            eastwest_coordinate="lst", sslon=None,
         ):
         """
         Initialize cloud tracking.
@@ -36,12 +36,14 @@ class CloudTracking():
             sslon: sub-solar longitude.
             tsize: template size of cloud tracking [degree]
             radius: altitude from planetary center in [km]
-            
-        
         """
         if radiances.dtype != np.float32:
             radiances = radiances.astype(np.float32)
-        # radiances = np.where(radiances-radiances==0, radiances, 1e-10)
+        if not isinstance(rad_masks, np.ndarray):
+            rad_masks = np.where(radiances-radiances==0, True, False)
+        if eastwest_coordinate=="lst":
+            if sslon==None:
+                raise ValueError("sslon should be set if eastwest_coordinate==\"lst\".")
         self.data = self.DataForCloudTracking()
         self.res = self.CloudTrackingResults()
         deg2grid=int(1/(lon[1]-lon[0]))
@@ -96,44 +98,46 @@ class CloudTracking():
         self.data.lat_vec_ind=lat_vec_ind
         self.data.lon_vec=lon_vec
         self.data.lat_vec=lat_vec
-        self.data.lst_vec = lst_vec
+        self.data.lst_vec=lst_vec
 
-        #ulimit: (2, ) or (2, ydivision-1)
-        if np.array(ulimit).size==2:
-            self.umin = np.full([ydivision-1], ulimit[0])
-            self.umax = np.full([ydivision-1], ulimit[1])
-        elif np.array(ulimit).size==(2*(ydivision-1)):
-            self.umin = ulimit[0]
-            self.umax = ulimit[1]
-        elif np.array(ulimit).shape[1]==3:
+        #ulimit: list of [[lat, umin, vmax], ...]
+        if np.array(ulimit).shape[1]==3:
             """"""
-            self.lerp_ulimit(ulimit)
+            umin, umax = self.lerp_limit(ulimit)
+            self.umin = umin
+            self.umax = umax
         else:
-            raise ValueError("array size of ulimit should be (2, ) or (2, ydivision-1)")
+            raise ValueError("array size of ulimit should be list of [[lat, umin, umax], ...]")
 
-        if np.array(vlimit).size==2:
-            self.vmin = vlimit[0]
-            self.vmax = vlimit[1]
+        if np.array(vlimit).shape[1]==3:
+            """"""
+            vmin, vmax = self.lerp_limit(vlimit)
+            self.vmin = vmin
+            self.vmax = vmax
         else:
-            raise ValueError("array size of vlimit should be (2, )")
+            raise ValueError("array size of vlimit should be list of [[lat, vmin, vmax], ...]")
         self.vel_margin = vel_margin
-
         self.RegionOfInterest()
 
-    def lerp_ulimit(self, ulimit):
+    def lerp_limit(self, limit):
         lat_vec = self.data.lat_vec
         ny = lat_vec.shape[0]
-        ulimit = np.array(ulimit)
-        umin = interp1d(ulimit[:, 0], ulimit[:, 1])(lat_vec)
-        umax = interp1d(ulimit[:, 0], ulimit[:, 2])(lat_vec)
-        self.umin = umin
-        self.umax = umax
+        limit = np.array(limit)
+        min_val = interp1d(limit[:, 0], limit[:, 1])(lat_vec)
+        max_val = interp1d(limit[:, 0], limit[:, 2])(lat_vec)
+        return min_val, max_val
+
 
     def CrossCorrelation(self, dif_streak=True, cc_mask_type="fill_zero"):
         """
-        r: cross-correlation
-        xind, yind: indices of the templates
-        theta = determined orientation
+        Conduct clculation of cross-correlation.
+        parameters:
+            dif_streak: If an elimination of streaks is applied (True) or not (False). The deafault is True.
+            cc_mask_type: 
+        results:
+            self.res.cc: cross-correlation
+            self.res.xind, self.res.yind: indices of sub-images used to cross-correlation calculation
+            self.res.theta: determined orientation which is dominant in each subimage
         """
         if cc_mask_type=="fill_zero":
             mask_value = 0.0
@@ -147,18 +151,25 @@ class CloudTracking():
         xind = [[[np.NaN]*(self.xdivision-1) for i in range(self.ydivision-1)] for j in range(self.nsp)]
         yind = [[[np.NaN]*(self.xdivision-1) for i in range(self.ydivision-1)] for j in range(self.nsp)]
         theta=  [[np.NaN]*(self.xdivision-1) for i in range(self.ydivision-1)]
+        cc_uaxis = [[[np.NaN]*(self.xdivision-1) for i in range(self.ydivision-1)] for j in range(self.nsp-1)]
+        cc_vaxis = [[[np.NaN]*(self.xdivision-1) for i in range(self.ydivision-1)] for j in range(self.nsp-1)]
 
         for mx in range(self.xdivision-1):
             for my in range(self.ydivision-1):
                 minlon = int(self.tsize/2*(mx+1))
                 minlat = int(self.tsize/2*(my+1))
-                rad=[]
-                rad_mask = []
+                rad=[np.NaN]*self.nsp
+                rad_mask = [np.NaN]*self.nsp
                 """Cut out sub-images"""
                 if_calc_cc=True
                 for ti in range(self.nsp):
+                # for ti in range(self.nsp-1, -1, -1):
                     dt = self.data.times[ti]-self.data.times[0]
-                    uminIdx, vminIdx, umaxIdx, vmaxIdx = fl.SearchRangeInDegree(self.umin[my]-self.vel_margin, self.vmin-self.vel_margin, self.umax[my]+self.vel_margin, self.vmax+self.vel_margin, self.data.lat_vec[my], dt, self.deg2grid, self.Rv)
+                    uminIdx, vminIdx, umaxIdx, vmaxIdx = fl.SearchRangeInDegree(
+                        self.umin[my]-self.vel_margin, self.vmin[my]-self.vel_margin,
+                        self.umax[my]+self.vel_margin, self.vmax[my]+self.vel_margin,
+                        self.data.lat_vec[my], dt, self.deg2grid, self.Rv,
+                    )
                     yindi = np.arange(minlat+vminIdx, minlat+self.tsize+vmaxIdx) # Y-indices of sub images
                     xindi = np.arange(minlon+uminIdx, minlon+self.tsize+umaxIdx) # X-indices of sub images
 
@@ -171,28 +182,37 @@ class CloudTracking():
                     radi = self.data.radiances[ti][yindi][:,xindi]
                     radi_mask = self.data.rad_masks[ti][yindi][:,xindi]
 
-                    if ti==0:
-                        if not (radi_mask.all()):
-                            if_calc_cc=False
-                            break
+                    # if ti==0:
+                    if not (radi_mask.all()):
+                        if_calc_cc=False
+                        break
                     
-                    radi = nd.gaussian_filter(radi, [5,5]) #low-pass filter
+                    # deg_lowpass = (.5+1*abs(self.data.lat_vec[my])/90.0)*5
+                    # deg_lowpass = 8
+                    # radi = nd.gaussian_filter(radi, [deg_lowpass,deg_lowpass]) #low-pass filter
                     if dif_streak:
+                        # if ti==self.nsp-1:
                         if ti==0:
                             theta[my][mx] = fl.orientation(radi) # determine orientation of streak
                         radi = fl.dif_img_along_streak(radi, theta[my][mx]) #differentiate
                     else:
                         theta[my][mx] = None
-
+                    if ti >=1:
+                        u_min_deg = fl.mps2dph(self.umin[my]-self.vel_margin, self.Rv, lat=self.data.lat_vec[my], cos_factor=True)
+                        v_min_deg = fl.mps2dph(self.vmin[my]-self.vel_margin, self.Rv, cos_factor=False)
+                        cc_uaxis[ti-1][my][mx] = np.arange(uminIdx, umaxIdx+1)/self.deg2grid/dt #+ u_min_deg
+                        cc_vaxis[ti-1][my][mx] = np.arange(vminIdx, vmaxIdx+1)/self.deg2grid/dt #+ v_min_deg
+                        # print(cc_uaxis[ti-1][my][mx][0], cc_uaxis[ti-1][my][mx][-1], u_min_deg)
                     xind[ti][my][mx] = xindi.tolist()
                     yind[ti][my][mx] = yindi.tolist()
-                    rad.append(radi)
-                    rad_mask.append(radi_mask)
+                    rad[ti] = radi
+                    rad_mask[ti] = radi_mask
                 if if_calc_cc:
                     for i in range(self.nsp-1):
                         rad_tmp = np.where(rad[i+1]-rad[i+1]==0, rad[i+1], 0.0).astype(np.float32)
                         cc = cv2.matchTemplate(rad_tmp, rad[0], cv2.TM_CCOEFF_NORMED) # calculate cross-correlation surface
-                        if cc_mask_type=="no_mask":
+                        if cc_mask_type!="no_mask":
+                            # print(rad_mask[i+1])
                             cc_mask = fl.CCSMask(rad[0].shape, cc.shape, rad_mask[i+1])
                             cc = np.where(cc_mask==True, cc, mask_value).astype(np.float32)
                         r[i][my][mx] = cc
@@ -200,6 +220,8 @@ class CloudTracking():
         self.res.cc = r
         self.res.xind = xind
         self.res.yind = yind
+        self.res.cc_uaxis = cc_uaxis
+        self.res.cc_vaxis = cc_vaxis
         gc.collect()
     # @profile
     def SuperPosition(self, spatial=True):
@@ -238,45 +260,121 @@ class CloudTracking():
             cc_tsp = np.where(num_tsp==0, np.NaN, cc_tsp)
             res_cc_sp[my][mx] = cc_tsp.astype(np.float32)#.tolist()
             res_n_sp[my][mx] = num_tsp
-        gc.collect()
+        # gc.collect()
 
         if spatial:
-            res_cc_stsp = [[np.NaN]*(self.xdivision-1) for i in range(self.ydivision-1)]
-            res_n_stsp = [[np.NaN]*(self.xdivision-1) for i in range(self.ydivision-1)]
+            res_cc_stsp  = [[np.NaN]*(self.xdivision-1) for i in range(self.ydivision-1)]
+            res_n_stsp   = [[np.NaN]*(self.xdivision-1) for i in range(self.ydivision-1)]
+            res_uax_stsp = [[np.NaN]*(self.xdivision-1) for i in range(self.ydivision-1)]
+            res_vax_stsp = [[np.NaN]*(self.xdivision-1) for i in range(self.ydivision-1)]
             for my, mx in selec:
-                neibs = [[my-1, mx], [my+1, mx], [my, mx-1], [my, mx+1]]
-                cc_stsp = np.array(res_cc_sp[my][mx], dtype=np.float32)
-                cc_stsp = np.where(cc_stsp-cc_stsp==0, cc_stsp, 0)
-                n_stsp = np.array(res_n_sp[my][mx], dtype=np.int32)
-                cent_ny, cent_nx = cc_stsp.shape
+                xneibs = [[my, mx-1], [my, mx+1]]
+                yneibs = [[my-1, mx], [my+1, mx]]
+                num_xneib = np.sum([1 if xneib in selec else 0 for xneib in xneibs])
+                num_yneib = np.sum([1 if yneib in selec else 0 for yneib in yneibs])
+                neibs = []
+                if num_xneib==2: neibs.extend(xneibs)
+                if num_yneib==2: neibs.extend(yneibs)
+                
+                cc0 = np.array(res_cc_sp[my][mx], dtype=np.float32)
+                num_sp0 = np.array(res_n_sp[my][mx], dtype=np.int32)
+                ny_cc0, nx_cc0 = cc0.shape
+                c0_uax = self.res.cc_uaxis[-1][my][mx]
+                c0_vax = self.res.cc_vaxis[-1][my][mx]
                 for neib in neibs:
-                    if neib in selec:
-                        cc_neib = np.array(res_cc_sp[neib[0]][neib[1]], dtype=np.float32)
-                        n_neib = np.array(res_n_sp[neib[0]][neib[1]], dtype=np.int32)
-                        neib_ny, neib_nx = cc_neib.shape
+                    cc1 = np.array(res_cc_sp[neib[0]][neib[1]], dtype=np.float32)
+                    num_sp1 = np.array(res_n_sp[neib[0]][neib[1]], dtype=np.int32)
+                    ny_cc1, nx_cc1 = cc1.shape
+                    c1_uax = self.res.cc_uaxis[-1][neib[0]][neib[1]]
+                    c1_vax = self.res.cc_vaxis[-1][neib[0]][neib[1]]
 
-                        x_ind_min_1 = max([0, cent_nx-neib_nx])
-                        x_ind_min_2 = max([0, neib_nx-cent_nx])
-                        cc_neib_cut = cc_neib[:, x_ind_min_2:neib_nx]
-                        n_neib_cut = n_neib[:, x_ind_min_2:neib_nx]
-                        cc_stsp_cut = cc_stsp[:, x_ind_min_1:cent_nx]
-                        n_stsp_cut = n_stsp[:, x_ind_min_1:cent_nx]
-                        cc_stsp[:, x_ind_min_1:cent_nx] += cc_neib[:, x_ind_min_2:neib_nx]
-                        cc_stsp[:, x_ind_min_1:cent_nx] = np.where(cc_neib_cut-cc_neib_cut==0, cc_stsp_cut+cc_neib_cut, cc_stsp_cut)
-                        n_stsp[:, x_ind_min_1:cent_nx] = np.where(cc_neib_cut-cc_neib_cut==0, n_stsp_cut+n_neib_cut, n_stsp_cut)
+                    du = c0_uax[1]-c0_uax[0]
+                    # print(int(round((max([c0_uax[-1], c1_uax[-1]]) - min([c0_uax[0], c1_uax[0]]))/du)))
+                    nx_new = int(round((max([c0_uax[-1], c1_uax[-1]]) - min([c0_uax[0], c1_uax[0]]))/du)) + 1
+                    ny_new = int(round((max([c0_vax[-1], c1_vax[-1]]) - min([c0_vax[0], c1_vax[0]]))/du)) + 1
+                    uax_new = np.linspace(min([c0_uax[0], c1_uax[0]]), max([c0_uax[-1], c1_uax[-1]]), nx_new)
+                    vax_new = np.linspace(min([c0_vax[0], c1_vax[0]]), max([c0_vax[-1], c1_vax[-1]]), ny_new)
+                    # print(uax_new.shape, vax_new.shape)
 
-                cc_stsp/=n_stsp
-                res_cc_stsp[my][mx] = cc_stsp
-                res_n_stsp[my][mx] = n_stsp
+                    cc0_ = np.zeros([ny_new, nx_new])
+                    cc1_ = np.zeros([ny_new, nx_new])
+                    num_sp0_ = np.zeros([ny_new, nx_new])
+                    num_sp1_ = np.zeros([ny_new, nx_new])
+                    # print(np.where(uax_new==c0_uax[0]), c0_uax[0], np.argmin(abs(uax_new-c0_uax[0])))
+                    uMinIdx_cc0 = np.argmin(abs(uax_new-c0_uax[0]))
+                    vMinIdx_cc0 = np.argmin(abs(vax_new-c0_vax[0]))
+                    uMinIdx_cc1 = np.argmin(abs(uax_new-c1_uax[0]))
+                    vMinIdx_cc1 = np.argmin(abs(vax_new-c1_vax[0]))
+                    # print(uMinIdx_cc0)
+                    cc0_[vMinIdx_cc0:vMinIdx_cc0+ny_cc0, uMinIdx_cc0:uMinIdx_cc0+nx_cc0] = cc0
+                    cc1_[vMinIdx_cc1:vMinIdx_cc1+ny_cc1, uMinIdx_cc1:uMinIdx_cc1+nx_cc1] = cc1
+                    num_sp0_[vMinIdx_cc0:vMinIdx_cc0+ny_cc0, uMinIdx_cc0:uMinIdx_cc0+nx_cc0] = num_sp0
+                    num_sp1_[vMinIdx_cc1:vMinIdx_cc1+ny_cc1, uMinIdx_cc1:uMinIdx_cc1+nx_cc1] = num_sp1
+
+                    cc_sum = cc0_ + cc1_
+                    num_sp_sum = num_sp0_ + num_sp1_
+
+                    #Update parameters
+                    cc0, num_sp0 = cc_sum, num_sp_sum
+                    c0_uax = uax_new
+                    c0_vax = vax_new
+                    ny_cc0, nx_cc0 = ny_new, nx_new
+                cc0/=num_sp0
+                res_cc_stsp[my][mx] = cc0
+                res_n_stsp[my][mx] = num_sp0
+                res_uax_stsp[my][mx] = c0_uax
+                res_vax_stsp[my][mx] = c0_vax
+
+                # cc_stsp = np.array(res_cc_sp[my][mx], dtype=np.float32)
+                # cc_xax = self.res.cc_xaxis[-1][my][mx]
+                # cc_yax = self.res.cc_yaxis[-1][my][mx]
+                # cc_stsp = np.where(cc_stsp-cc_stsp==0, cc_stsp, 0)
+                # n_stsp = np.array(res_n_sp[my][mx], dtype=np.int32)
+                # cent_ny, cent_nx = cc_stsp.shape
+                # for neib in neibs:
+                #     cc_neib = np.array(res_cc_sp[neib[0]][neib[1]], dtype=np.float32)
+                #     n_neib = np.array(res_n_sp[neib[0]][neib[1]], dtype=np.int32)
+                #     neib_ny, neib_nx = cc_neib.shape
+
+                #     x_ind_min_1 = max([0, cent_nx-neib_nx])
+                #     x_ind_min_2 = max([0, neib_nx-cent_nx])
+                #     # if cent_ny > neib_ny:
+                #     #     ymin_neib = (cent_ny-neib_ny)//2
+                #     #     ymax_neib = (cent_ny+neib_ny)//2
+                #     #     ymin_cent = 0
+                #     #     ymax_cent = cent_ny
+                #     # else:
+                #     #     ymin_neib = 0
+                #     #     ymax_neib = neib_ny
+                #     #     ymin_cent = (neib_ny-cent_ny)//2
+                #     #     ymax_cent = (neib_ny+cent_ny)//2
+                    
+                    
+                #     cc_neib_cut = cc_neib[:, x_ind_min_2:neib_nx]
+                #     n_neib_cut = n_neib[:, x_ind_min_2:neib_nx]
+                #     cc_stsp_cut = cc_stsp[:, x_ind_min_1:cent_nx]
+                #     n_stsp_cut = n_stsp[:, x_ind_min_1:cent_nx]
+                #     cc_stsp[:, x_ind_min_1:cent_nx] += cc_neib[:, x_ind_min_2:neib_nx]
+                #     cc_stsp[:, x_ind_min_1:cent_nx] = np.where(cc_neib_cut-cc_neib_cut==0, cc_stsp_cut+cc_neib_cut, cc_stsp_cut)
+                #     n_stsp[:, x_ind_min_1:cent_nx] = np.where(cc_neib_cut-cc_neib_cut==0, n_stsp_cut+n_neib_cut, n_stsp_cut)
+
+                # cc_stsp/=n_stsp
+                # res_cc_stsp[my][mx] = cc_stsp
+                # res_n_stsp[my][mx] = n_stsp
 
             self.res.cc_sp=res_cc_stsp
             self.res.num_sp=res_n_stsp
+            self.res.uax_sp = res_uax_stsp
+            self.res.vax_sp = res_vax_stsp
+
             del res_cc_sp, res_n_sp, res_cc_stsp, res_n_stsp
             gc.collect()
         else:
             self.res.cc_sp=res_cc_sp
-            self.res.num_sp=res_num_sp
-            del res_cc_sp, res_num_sp
+            self.res.num_sp=res_n_sp
+            self.res.uax_sp = self.res.cc_uaxis[-1]
+            self.res.vax_sp = self.res.cc_vaxis[-1]
+            del res_cc_sp, res_n_sp
             gc.collect()
 
     def RegionOfInterest(self):
@@ -285,15 +383,15 @@ class CloudTracking():
         for i in range(self.ydivision-1):
             uminIdx0, vminIdx0, umaxIdx0, vmaxIdx0 = fl.SearchRangeInDegree(
                 self.umin[i]-self.vel_margin,
-                self.vmin-self.vel_margin,
+                self.vmin[i]-self.vel_margin,
                 self.umax[i]+self.vel_margin,
-                self.vmax+self.vel_margin,
+                self.vmax[i]+self.vel_margin,
                 self.data.lat_vec[i],
                 dt,
                 self.deg2grid,
                 self.Rv
             )
-            uminIdx, vminIdx, umaxIdx, vmaxIdx = fl.SearchRangeInDegree(self.umin[i], self.vmin, self.umax[i], self.vmax, self.data.lat_vec[i], dt, self.deg2grid, self.Rv)
+            uminIdx, vminIdx, umaxIdx, vmaxIdx = fl.SearchRangeInDegree(self.umin[i], self.vmin[i], self.umax[i], self.vmax[i], self.data.lat_vec[i], dt, self.deg2grid, self.Rv)
             roi_y = np.zeros([vmaxIdx0-vminIdx0+1, umaxIdx0-uminIdx0+1])
 
             maxROIx = umaxIdx - uminIdx0
@@ -304,24 +402,6 @@ class CloudTracking():
             roi.append(roi_y)
         self.roi = roi
 
-    def Velocity(self):
-        xdivision = self.xdivision
-        ydivision = self.ydivision
-        opt_u = np.zeros([ydivision-1, xdivision-1])
-        opt_v = np.zeros([ydivision-1, xdivision-1])
-        for x in range(xdivision-1):
-            for y in range(ydivision-1):
-                cc = np.array(self.res.cc_tsp[y][x])
-                cc_roied = cc*self.roi[y]
-                if isinstance(cc, np.ndarray):
-                    if (cc_roied.ndim==2) and ((cc_roied-cc_roied==0).any()):
-                        ncy, ncx = cc_roied.shape
-                        ind_1d = np.nanargmax(cc_roied)
-                        opt_u[y,x], opt_v[y,x] = ind_1d%ncx, ind_1d//ncx
-                    else:
-                        opt_u[y,x], opt_v[y,x] = np.NaN, np.NaN
-        self.res.u_grid=opt_u
-        self.res.v_grid=opt_v
 
     def Relaxation(self, a=0.2, d=1.0, thresh=0.2):
         """
@@ -336,7 +416,29 @@ class CloudTracking():
         for my, mx in selec:
             cc = np.array(self.res.cc_sp[my][mx])
             if cc.ndim==2:
-                candidates[my][mx] = fl.FindPeaks2d(cc, roi=self.roi[my], thresh=thresh)
+                uax = self.res.uax_sp[my][mx]
+                vax = self.res.vax_sp[my][mx]
+                ny, nx = cc.shape
+                roi = np.zeros_like(cc)
+                dt = self.data.times[-1]-self.data.times[0]
+                u_min_deg = fl.mps2dph(self.umin[my], self.Rv, lat=self.data.lat_vec[my], cos_factor=True)
+                u_max_deg = fl.mps2dph(self.umax[my], self.Rv, lat=self.data.lat_vec[my], cos_factor=True)
+                v_min_deg = fl.mps2dph(self.vmin[my], self.Rv, cos_factor=False)
+                v_max_deg = fl.mps2dph(self.vmax[my], self.Rv, cos_factor=False)
+                u_roi = np.where(u_min_deg<=uax, 1, 0)*np.where(uax<=u_max_deg, 1, 0)
+                v_roi = np.where(v_min_deg<=vax, 1, 0)*np.where(vax<=v_max_deg, 1, 0)
+                u_roi_mat, v_roi_mat = np.meshgrid(u_roi, v_roi)
+                roi = u_roi_mat * v_roi_mat
+                # u_roi_idx = np.where(u_roi==1)[0]
+                # v_roi_idx = np.where(v_roi==1)[0]
+                
+                # print(roi.shape, u_roi_idx[0].shape, v_roi_idx[0].shape)
+                # roi[v_roi_idx][:, u_roi_idx] = np.ones([u_roi_idx.size, v_roi_idx.size])
+                # roi[v_roi_idx][:, u_roi_idx] = 1
+                # roi[30,300] = 1
+                # print(roi.sum(), roi[30, 300], roi.shape, u_roi.sum(), v_roi.sum(), u_min_deg, u_max_deg, uax[0], uax[-1])
+                
+                candidates[my][mx] = fl.FindPeaks2d(cc, roi=roi, thresh=thresh)
                 p[my][mx] = cc[candidates[my][mx]]
             else:
                 candidates[my][mx] = (np.array([]), np.array([]))
@@ -405,6 +507,7 @@ class CloudTracking():
             for neib in selec_ssp:
                 if neib in selec:
                     yi, xi = neib
+                    
                     nssp+=1
                     u_grid=self.res.u_grid[yi][xi]
                     v_grid=self.res.v_grid[yi][xi]
@@ -413,15 +516,22 @@ class CloudTracking():
                     img1 = self.data.radiances[0][self.res.yind[0][yi][xi]][:,self.res.xind[0][yi][xi]]
                     theta = self.res.theta[yi][xi]
                     if theta: img1 = fl.dif_img_along_streak(img1, theta)
+                    ny1, nx1 = img1.shape
+
                     cc_n = np.array(self.res.cc[-1][yi][xi])
                     for i in range(self.nsp-1):
                         cc = np.array(self.res.cc[i][yi][xi])
-                        uind = cc.shape[1]/cc_n.shape[1]*u_grid
-                        vind = cc.shape[0]/cc_n.shape[0]*v_grid
-                        uinds.append(int(uind))
-                        vinds.append(int(vind))
-
-                        img2 = self.data.radiances[i+1][self.res.yind[i+1][yi][xi]][:,self.res.xind[i+1][yi][xi]]
+                        uMinIdx = int(cc.shape[1]/cc_n.shape[1]*u_grid)
+                        vMinIdx = int(cc.shape[0]/cc_n.shape[0]*v_grid)
+                        urange = np.arange(uMinIdx, uMinIdx+nx1)
+                        vrange = np.arange(vMinIdx, vMinIdx+ny1)
+                        urange = np.where(urange<self.data.nx, urange, urange-self.data.nx)
+                        uinds.append(urange)
+                        vinds.append(urange)
+                        
+                        img2xMin = self.res.xind[i+1][yi][xi][0]
+                        img2yMin = self.res.yind[i+1][yi][xi][0]
+                        img2 = self.data.radiances[i+1][vrange+img2yMin][:, urange+img2xMin]
                         if theta: img2 = fl.dif_img_along_streak(img2, theta)
                         imgs2.append(img2)
 
@@ -431,15 +541,14 @@ class CloudTracking():
                     omega: correlation length
                     dof: effective degree of degree of freedom
                     """
-                    ny1, nx1 = img1.shape
-                    x = img1.reshape([-1])
-                    n = x.shape[0]
-                    ac1 = fl.auto_corr(x)
-                    for uind, vind, img2 in zip(uinds, vinds, imgs2):
+                    n = ny1*nx1
+                    ac1 = fl.auto_corr(img1.reshape([-1]))
+                    for img2 in imgs2:
                         ny2, nx2 = img2.shape
-                        ac2 = fl.auto_corr(img2[vind:vind+ny1][:,uind:uind+nx1].reshape([-1]))
+                        # ac2 = fl.auto_corr(img2[vind:vind+ny1][:,uind:uind+nx1].reshape([-1]))
+                        # ac2 = fl.auto_corr(img2[vind][:,uind].reshape([-1]))
+                        ac2 = fl.auto_corr(img2.reshape([-1]))
                         tau = np.arange(-n+1,n)
-
                         omega = np.nansum((1-abs(tau)/n)*ac1*ac2)
                         dof = n/omega
                         err_ti = 1.0/np.sqrt(dof-3)
@@ -456,8 +565,14 @@ class CloudTracking():
                 nccy, nccx = cc_tsp.shape
                 cc_err_x = np.full(nccx, err)
                 cc_err_y = np.full(nccy, err)
+                
+                # import matplotlib.pyplot as plt
+                # plt.imshow(cc_tsp)
+                # plt.plot(u_grid0, v_grid0, ".")
+                # plt.show()
                 usub[my, mx], uerr[my, mx] = fl.FitCC(np.arange(nccx), cc_tsp[v_grid0], cc_err_x, u_grid0)
                 vsub[my, mx], verr[my, mx] = fl.FitCC(np.arange(nccy), cc_tsp[:,u_grid0], cc_err_y, v_grid0)
+                # print(my, uerr[my, mx], verr[my, mx])
         self.res.u_sub_grid = usub
         self.res.u_err_grid = uerr
         self.res.v_sub_grid = vsub
@@ -474,9 +589,10 @@ class CloudTracking():
         cos_lat = np.cos(self.data.lat_vec*np.pi/180)
         cos_lat_mat = np.dot(cos_lat.reshape([-1, 1]), np.ones([self.xdivision-1]).reshape([1, -1]))
         umin_mat = np.dot(np.array(self.umin).reshape([-1, 1]), np.ones([self.xdivision-1]).reshape([1, -1]))
+        vmin_mat = np.dot(np.array(self.vmin).reshape([-1, 1]), np.ones([self.xdivision-1]).reshape([1, -1]))
 
         u     = self.res.u_sub_grid/self.deg2grid*circum*np.array(cos_lat_mat)/360/dt/3.6 + umin_mat - self.vel_margin
-        v     = self.res.v_sub_grid/self.deg2grid*circum/360/dt/3.6 + self.vmin - self.vel_margin
+        v     = self.res.v_sub_grid/self.deg2grid*circum/360/dt/3.6 + vmin_mat - self.vel_margin
         u_err = self.res.u_err_grid/self.deg2grid*circum*np.array(cos_lat_mat)/360/dt/3.6
         v_err = self.res.v_err_grid/self.deg2grid*circum/360/dt/3.6
 
@@ -487,14 +603,14 @@ class CloudTracking():
 
     def OutputResults(self, file, ccfile=None):
         output_data = {}
-        output_data["u"]    = {"unit": "m s^-1", "value": fl.ConvertNdarray2List(self.res.u_sub_meter, "+.6e")}
-        output_data["v"]    = {"unit": "m s^-1", "value": fl.ConvertNdarray2List(self.res.v_sub_meter, "+.6e")}
-        output_data["u_err"]= {"unit": "m s^-1", "value": fl.ConvertNdarray2List(self.res.u_err_meter, "+.6e")}
-        output_data["v_err"]= {"unit": "m s^-1", "value": fl.ConvertNdarray2List(self.res.v_err_meter, "+.6e")}
-        output_data["t"]    = {"unit": "hours since 2000-01-01T00:00:00", "value": fl.ConvertNdarray2List(self.data.times, "+.8e")}
-        output_data["lon"]  = {"unit": "degree", "value": fl.ConvertNdarray2List(self.data.lon_vec, "+.4e")}
-        output_data["lat"]  = {"unit": "degree", "value": fl.ConvertNdarray2List(self.data.lat_vec, "+.4e")}
-        output_data["lst"]  = {"unit": "hours", "value": fl.ConvertNdarray2List(self.data.lst_vec, "+.4e")}
+        output_data["u"]    = {"unit": "m s^-1", "value": fl.ConvertNdarray2List(self.res.u_sub_meter)}
+        output_data["v"]    = {"unit": "m s^-1", "value": fl.ConvertNdarray2List(self.res.v_sub_meter)}
+        output_data["u_err"]= {"unit": "m s^-1", "value": fl.ConvertNdarray2List(self.res.u_err_meter)}
+        output_data["v_err"]= {"unit": "m s^-1", "value": fl.ConvertNdarray2List(self.res.v_err_meter)}
+        output_data["t"]    = {"unit": "hours since 2000-01-01T00:00:00", "value": fl.ConvertNdarray2List(self.data.times)}
+        output_data["lon"]  = {"unit": "degree", "value": fl.ConvertNdarray2List(self.data.lon_vec)}
+        output_data["lat"]  = {"unit": "degree", "value": fl.ConvertNdarray2List(self.data.lat_vec)}
+        output_data["lst"]  = {"unit": "hours" , "value": fl.ConvertNdarray2List(self.data.lst_vec)}
 
         with open(file,'w') as f:
             json.dump(output_data,f,indent=4, ensure_ascii=False)
