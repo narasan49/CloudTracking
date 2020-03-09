@@ -118,7 +118,6 @@ def dif_img_along_streak(img, theta):
     res[-1, :] = 0
     res[ :, 0] = 0
     res[ :,-1] = 0
-    # res = np.where(res-res == 0, res, 0) #nan埋めを0埋めに変換
 
     return res
 

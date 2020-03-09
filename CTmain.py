@@ -188,8 +188,8 @@ class CloudTracking():
                         break
                     
                     # deg_lowpass = (.5+1*abs(self.data.lat_vec[my])/90.0)*5
-                    # deg_lowpass = 8
-                    # radi = nd.gaussian_filter(radi, [deg_lowpass,deg_lowpass]) #low-pass filter
+                    deg_lowpass = 5
+                    radi = nd.gaussian_filter(radi, [deg_lowpass,deg_lowpass]) #low-pass filter
                     if dif_streak:
                         # if ti==self.nsp-1:
                         if ti==0:
@@ -314,7 +314,7 @@ class CloudTracking():
                     cc_sum = cc0_ + cc1_
                     num_sp_sum = num_sp0_ + num_sp1_
 
-                    #Update parameters
+                    #Update variables
                     cc0, num_sp0 = cc_sum, num_sp_sum
                     c0_uax = uax_new
                     c0_vax = vax_new
